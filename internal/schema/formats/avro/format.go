@@ -12,6 +12,12 @@ import (
 // Format implements types.SchemaFormat for Avro
 type Format struct{}
 
+// fieldInfo represents information about an Avro field
+type fieldInfo struct {
+	required bool
+	type_    string
+}
+
 // New creates a new Avro format implementation
 func New() *Format {
 	return &Format{}
@@ -19,14 +25,9 @@ func New() *Format {
 
 func (f *Format) Validate(schemaStr string) error {
 	// Parse schema
-	schema, err := avro.Parse(schemaStr)
+	_, err := avro.Parse(schemaStr)
 	if err != nil {
 		return fmt.Errorf("parse schema: %w", err)
-	}
-
-	// Validate schema
-	if err := schema.Validate(); err != nil {
-		return fmt.Errorf("validate schema: %w", err)
 	}
 
 	return nil
@@ -100,7 +101,7 @@ func (f *Format) CheckCompatibility(oldSchema, newSchema string, level types.Com
 }
 
 // isBackwardCompatible checks if new schema can read data written with old schema
-func (f *Format) isBackwardCompatible(oldSchema, newSchema *avro.Schema) (bool, error) {
+func (f *Format) isBackwardCompatible(oldSchema, newSchema avro.Schema) (bool, error) {
 	// Get fields from both schemas
 	oldFields := f.getFields(oldSchema)
 	newFields := f.getFields(newSchema)
@@ -131,7 +132,7 @@ func (f *Format) isBackwardCompatible(oldSchema, newSchema *avro.Schema) (bool, 
 }
 
 // isForwardCompatible checks if old schema can read data written with new schema
-func (f *Format) isForwardCompatible(oldSchema, newSchema *avro.Schema) (bool, error) {
+func (f *Format) isForwardCompatible(oldSchema, newSchema avro.Schema) (bool, error) {
 	// Get fields from both schemas
 	oldFields := f.getFields(oldSchema)
 	newFields := f.getFields(newSchema)
@@ -190,37 +191,40 @@ func (f *Format) parseSchema(schemaStr string) (map[string]interface{}, error) {
 	return schemaMap, nil
 }
 
-func (f *Format) getFields(schema *avro.Schema) map[string]fieldInfo {
+func (f *Format) getFields(schema avro.Schema) map[string]fieldInfo {
 	fields := make(map[string]fieldInfo)
 
-	// Extract fields from schema
-	if fieldsList, ok := schema.Fields(); ok {
-		for _, field := range fieldsList {
-			name := field.Name()
-			typeValue := field.Type()
-			required := true // Default to required unless specified as optional
+	// Check if schema is a record type
+	recordSchema, ok := schema.(*avro.RecordSchema)
+	if !ok {
+		return fields
+	}
 
-			// Handle type field which can be string or array
-			var typeStr string
-			switch t := typeValue.(type) {
-			case string:
-				typeStr = t
-			case []interface{}:
-				// Check if field is optional (union with null)
-				for _, v := range t {
-					if v == "null" {
-						required = false
-					}
-					if s, ok := v.(string); ok {
-						typeStr = s
-					}
+	// Extract fields from record schema
+	for _, field := range recordSchema.Fields() {
+		name := field.Name()
+		typeValue := field.Type()
+		required := true // Default to required unless specified as optional
+
+		// Handle type field
+		var typeStr string
+		switch t := typeValue.(type) {
+		case *avro.UnionSchema:
+			// Check if field is optional (union with null)
+			for _, v := range t.Types() {
+				if v.Type() == avro.Null {
+					required = false
+				} else {
+					typeStr = string(v.Type())
 				}
 			}
+		default:
+			typeStr = string(typeValue.Type())
+		}
 
-			fields[name] = fieldInfo{
-				required: required,
-				type_:    typeStr,
-			}
+		fields[name] = fieldInfo{
+			required: required,
+			type_:    typeStr,
 		}
 	}
 

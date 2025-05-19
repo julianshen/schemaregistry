@@ -234,7 +234,8 @@ func (f *Format) getFields(message protoreflect.MessageDescriptor) map[string]fi
 	for i := 0; i < message.Fields().Len(); i++ {
 		field := message.Fields().Get(i)
 		name := string(field.Name())
-		required := field.IsRequired()
+		// A field is required if it has REQUIRED cardinality
+		required := field.Cardinality() == protoreflect.Required
 		type_ := string(field.Kind())
 
 		fields[name] = fieldInfo{
