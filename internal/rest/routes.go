@@ -312,10 +312,11 @@ type SchemaRecord struct {
 	SchemaType string `json:"schemaType,omitempty"`
 }
 
-// SchemaRequest is payload for registering schemas.
+// SchemaRequest represents a schema registration request
 type SchemaRequest struct {
-	Schema     string `json:"schema"`
-	SchemaType string `json:"schemaType,omitempty"`
+	Schema     string                    `json:"schema"`
+	SchemaType string                    `json:"schemaType,omitempty"`
+	References []types.SchemaReference   `json:"references,omitempty"`
 }
 
 // SchemaResponse returns the schema ID.
@@ -465,8 +466,8 @@ func registerSchema(c *gin.Context) {
 		schemaType = types.SchemaType(req.SchemaType)
 	}
 
-	slog.Debug("Registering schema", "subject", subject, "schema", req.Schema, "schemaType", schemaType)
-	id, err := registry.RegisterSchema(subject, req.Schema, schemaType)
+	slog.Debug("Registering schema", "subject", subject, "schema", req.Schema, "schemaType", schemaType, "references", req.References)
+	id, err := registry.RegisterSchema(subject, req.Schema, schemaType, req.References)
 	if err != nil {
 		if err.Error() == "incompatible schema" {
 			c.JSON(http.StatusConflict, ErrorResponse{

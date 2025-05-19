@@ -240,8 +240,8 @@ func (r *Registry) handleConfigUpdate(update nats.KeyValueEntry) {
 	}
 }
 
-// RegisterSchema registers a new schema and returns its ID
-func (r *Registry) RegisterSchema(subject string, schemaStr string, schemaType types.SchemaType) (int, error) {
+// RegisterSchema registers a new schema under a subject
+func (r *Registry) RegisterSchema(subject string, schemaStr string, schemaType types.SchemaType, references []types.SchemaReference) (int, error) {
 	// Validate schema format
 	format, ok := r.formats[schemaType]
 	if !ok {
@@ -251,6 +251,20 @@ func (r *Registry) RegisterSchema(subject string, schemaStr string, schemaType t
 	// Validate the schema
 	if err := format.Validate(schemaStr); err != nil {
 		return 0, fmt.Errorf("validate schema: %w", err)
+	}
+
+	// Validate references
+	for _, ref := range references {
+		// Check if referenced schema exists
+		refSchema, err := r.getSchemaByVersion(ref.Subject, ref.Version)
+		if err != nil {
+			return 0, fmt.Errorf("referenced schema not found: %s version %d", ref.Subject, ref.Version)
+		}
+
+		// Check if referenced schema type matches
+		if refSchema.Type != schemaType {
+			return 0, fmt.Errorf("referenced schema type mismatch: expected %s, got %s", schemaType, refSchema.Type)
+		}
 	}
 
 	// Check if schema already exists for this subject
@@ -323,11 +337,12 @@ func (r *Registry) RegisterSchema(subject string, schemaStr string, schemaType t
 		// Create new version for this subject
 		newVersion := latestVersion + 1
 		schema := &types.Schema{
-			Schema:  schemaStr,
-			Subject: subject,
-			Version: newVersion,
-			ID:      existingID,
-			Type:    schemaType,
+			Schema:     schemaStr,
+			Subject:    subject,
+			Version:    newVersion,
+			ID:         existingID,
+			Type:       schemaType,
+			References: references,
 		}
 
 		// Store schema by subject and version
@@ -355,11 +370,12 @@ func (r *Registry) RegisterSchema(subject string, schemaStr string, schemaType t
 	// Create new schema
 	newVersion := latestVersion + 1
 	schema := &types.Schema{
-		Schema:  schemaStr,
-		Subject: subject,
-		Version: newVersion,
-		ID:      nextID,
-		Type:    schemaType,
+		Schema:     schemaStr,
+		Subject:    subject,
+		Version:    newVersion,
+		ID:         nextID,
+		Type:       schemaType,
+		References: references,
 	}
 
 	// Store schema by ID

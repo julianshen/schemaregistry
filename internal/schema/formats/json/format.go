@@ -20,8 +20,24 @@ func New() *Format {
 }
 
 func (f *Format) Validate(schemaStr string) error {
-	_, err := jsonschema.CompileString("schema.json", schemaStr)
-	return err
+	// Parse schema
+	compiler := jsonschema.NewCompiler()
+	if err := compiler.AddResource("schema.json", bytes.NewReader([]byte(schemaStr))); err != nil {
+		return fmt.Errorf("add schema resource: %w", err)
+	}
+
+	// Compile schema
+	schema, err := compiler.Compile("schema.json")
+	if err != nil {
+		return fmt.Errorf("compile schema: %w", err)
+	}
+
+	// Validate schema
+	if err := schema.Validate(nil); err != nil {
+		return fmt.Errorf("validate schema: %w", err)
+	}
+
+	return nil
 }
 
 func (f *Format) Serialize(data interface{}, schemaStr string) ([]byte, error) {
@@ -68,96 +84,80 @@ func (f *Format) Deserialize(data []byte, schemaStr string) (interface{}, error)
 }
 
 func (f *Format) CheckCompatibility(oldSchema, newSchema string, level types.CompatibilityLevel) (bool, error) {
-	// Compile both schemas
-	oldCompiler := jsonschema.NewCompiler()
-	if err := oldCompiler.AddResource("old.json", bytes.NewReader([]byte(oldSchema))); err != nil {
-		return false, fmt.Errorf("add old schema resource: %w", err)
-	}
-	oldSchemaObj, err := oldCompiler.Compile("old.json")
-	if err != nil {
-		return false, fmt.Errorf("compile old schema: %w", err)
-	}
-
-	newCompiler := jsonschema.NewCompiler()
-	if err := newCompiler.AddResource("new.json", bytes.NewReader([]byte(newSchema))); err != nil {
-		return false, fmt.Errorf("add new schema resource: %w", err)
-	}
-	newSchemaObj, err := newCompiler.Compile("new.json")
-	if err != nil {
-		return false, fmt.Errorf("compile new schema: %w", err)
-	}
-
-	slog.Debug("CheckCompatibility called", "level", level, "oldSchema", oldSchema, "newSchema", newSchema)
+	// Parse schemas
+	oldProps := f.getSchemaProperties(oldSchema)
+	newProps := f.getSchemaProperties(newSchema)
 
 	// Check compatibility based on level
 	switch level {
 	case types.Backward, types.BackwardTransitive:
 		// New schema can read data written with old schema
-		return f.checkBackwardCompatibility(oldSchemaObj, newSchemaObj, oldSchema, newSchema)
+		return f.isBackwardCompatible(oldProps, newProps)
 	case types.Forward, types.ForwardTransitive:
 		// Old schema can read data written with new schema
-		return f.checkForwardCompatibility(oldSchemaObj, newSchemaObj, oldSchema, newSchema)
+		return f.isForwardCompatible(oldProps, newProps)
 	case types.Full, types.FullTransitive:
 		// Both backward and forward compatibility
-		backward, err := f.checkBackwardCompatibility(oldSchemaObj, newSchemaObj, oldSchema, newSchema)
+		backward, err := f.isBackwardCompatible(oldProps, newProps)
 		if err != nil || !backward {
 			return false, err
 		}
-		return f.checkForwardCompatibility(oldSchemaObj, newSchemaObj, oldSchema, newSchema)
-	default:
+		return f.isForwardCompatible(oldProps, newProps)
+	case types.None:
 		return true, nil
+	default:
+		return false, fmt.Errorf("unsupported compatibility level: %s", level)
 	}
 }
 
-func (f *Format) checkBackwardCompatibility(oldSchema, newSchema *jsonschema.Schema, oldSchemaStr, newSchemaStr string) (bool, error) {
-	oldProps := f.getSchemaProperties(oldSchemaStr)
-	newProps := f.getSchemaProperties(newSchemaStr)
-
-	slog.Debug("checkBackwardCompatibility: oldProps", "props", oldProps)
-	slog.Debug("checkBackwardCompatibility: newProps", "props", newProps)
-
-	// Check if all required properties in old schema exist in new schema
-	for prop, info := range oldProps {
-		if info.required {
-			if _, exists := newProps[prop]; !exists {
-				slog.Debug("Property missing in new schema", "property", prop)
-				return false, fmt.Errorf("required property %s removed in new schema", prop)
+// isBackwardCompatible checks if new schema can read data written with old schema
+func (f *Format) isBackwardCompatible(oldProps, newProps map[string]propertyInfo) (bool, error) {
+	// Check each property in the old schema
+	for name, oldProp := range oldProps {
+		newProp, exists := newProps[name]
+		if !exists {
+			// Property was removed
+			if oldProp.required {
+				return false, fmt.Errorf("required property %s was removed", name)
 			}
+			continue
 		}
-	}
 
-	// Check if property types are compatible
-	for prop, oldInfo := range oldProps {
-		if newInfo, exists := newProps[prop]; exists {
-			if !f.isTypeCompatible(oldInfo.type_, newInfo.type_) {
-				slog.Debug("Type mismatch detected", "property", prop, "oldType", oldInfo.type_, "newType", newInfo.type_)
-				return false, fmt.Errorf("incompatible type change for property %s", prop)
-			}
+		// Check type compatibility
+		if !f.isTypeCompatible(oldProp.type_, newProp.type_) {
+			return false, fmt.Errorf("incompatible types for property %s: %s -> %s", name, oldProp.type_, newProp.type_)
+		}
+
+		// Check if property became required
+		if !oldProp.required && newProp.required {
+			return false, fmt.Errorf("property %s became required", name)
 		}
 	}
 
 	return true, nil
 }
 
-func (f *Format) checkForwardCompatibility(oldSchema, newSchema *jsonschema.Schema, oldSchemaStr, newSchemaStr string) (bool, error) {
-	oldProps := f.getSchemaProperties(oldSchemaStr)
-	newProps := f.getSchemaProperties(newSchemaStr)
-
-	// Check if all required properties in new schema exist in old schema
-	for prop, info := range newProps {
-		if info.required {
-			if _, exists := oldProps[prop]; !exists {
-				return false, fmt.Errorf("required property %s added in new schema", prop)
+// isForwardCompatible checks if old schema can read data written with new schema
+func (f *Format) isForwardCompatible(oldProps, newProps map[string]propertyInfo) (bool, error) {
+	// Check each property in the new schema
+	for name, newProp := range newProps {
+		oldProp, exists := oldProps[name]
+		if !exists {
+			// New property was added
+			if newProp.required {
+				return false, fmt.Errorf("new required property %s was added", name)
 			}
+			continue
 		}
-	}
 
-	// Check if property types are compatible
-	for prop, newInfo := range newProps {
-		if oldInfo, exists := oldProps[prop]; exists {
-			if !f.isTypeCompatible(oldInfo.type_, newInfo.type_) {
-				return false, fmt.Errorf("incompatible type change for property %s", prop)
-			}
+		// Check type compatibility
+		if !f.isTypeCompatible(newProp.type_, oldProp.type_) {
+			return false, fmt.Errorf("incompatible types for property %s: %s -> %s", name, newProp.type_, oldProp.type_)
+		}
+
+		// Check if property became optional
+		if oldProp.required && !newProp.required {
+			return false, fmt.Errorf("property %s became optional", name)
 		}
 	}
 

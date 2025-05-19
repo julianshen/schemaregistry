@@ -32,13 +32,21 @@ const (
 	FullTransitive CompatibilityLevel = "FULL_TRANSITIVE"
 )
 
+// SchemaReference represents a reference to another schema
+type SchemaReference struct {
+	Name    string `json:"name"`    // Reference name
+	Subject string `json:"subject"` // Name of the referenced subject
+	Version int    `json:"version"` // Version number of the referenced subject
+}
+
 // Schema represents a stored schema
 type Schema struct {
-	Schema  string     `json:"schema"`
-	Subject string     `json:"subject"`
-	Version int        `json:"version"`
-	ID      int        `json:"id"`
-	Type    SchemaType `json:"type"`
+	Schema     string            `json:"schema"`
+	Subject    string            `json:"subject"`
+	Version    int               `json:"version"`
+	ID         int               `json:"id"`
+	Type       SchemaType        `json:"type"`
+	References []SchemaReference `json:"references,omitempty"`
 }
 
 // SchemaFormat defines the interface for schema format implementations

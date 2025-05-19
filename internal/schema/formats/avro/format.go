@@ -18,11 +18,22 @@ func New() *Format {
 }
 
 func (f *Format) Validate(schemaStr string) error {
-	_, err := avro.Parse(schemaStr)
-	return err
+	// Parse schema
+	schema, err := avro.Parse(schemaStr)
+	if err != nil {
+		return fmt.Errorf("parse schema: %w", err)
+	}
+
+	// Validate schema
+	if err := schema.Validate(); err != nil {
+		return fmt.Errorf("validate schema: %w", err)
+	}
+
+	return nil
 }
 
 func (f *Format) Serialize(data interface{}, schemaStr string) ([]byte, error) {
+	// Parse schema
 	schema, err := avro.Parse(schemaStr)
 	if err != nil {
 		return nil, fmt.Errorf("parse schema: %w", err)
@@ -39,6 +50,7 @@ func (f *Format) Serialize(data interface{}, schemaStr string) ([]byte, error) {
 }
 
 func (f *Format) Deserialize(data []byte, schemaStr string) (interface{}, error) {
+	// Parse schema
 	schema, err := avro.Parse(schemaStr)
 	if err != nil {
 		return nil, fmt.Errorf("parse schema: %w", err)
@@ -54,13 +66,13 @@ func (f *Format) Deserialize(data []byte, schemaStr string) (interface{}, error)
 }
 
 func (f *Format) CheckCompatibility(oldSchema, newSchema string, level types.CompatibilityLevel) (bool, error) {
-	// Parse schemas to get their structure
-	oldSchemaMap, err := f.parseSchema(oldSchema)
+	// Parse schemas
+	oldAvroSchema, err := avro.Parse(oldSchema)
 	if err != nil {
 		return false, fmt.Errorf("parse old schema: %w", err)
 	}
 
-	newSchemaMap, err := f.parseSchema(newSchema)
+	newAvroSchema, err := avro.Parse(newSchema)
 	if err != nil {
 		return false, fmt.Errorf("parse new schema: %w", err)
 	}
@@ -69,23 +81,84 @@ func (f *Format) CheckCompatibility(oldSchema, newSchema string, level types.Com
 	switch level {
 	case types.Backward, types.BackwardTransitive:
 		// New schema can read data written with old schema
-		// For transitive, registry layer will check against all previous versions
-		return f.checkBackwardCompatibility(oldSchemaMap, newSchemaMap)
+		return f.isBackwardCompatible(oldAvroSchema, newAvroSchema)
 	case types.Forward, types.ForwardTransitive:
 		// Old schema can read data written with new schema
-		// For transitive, registry layer will check against all previous versions
-		return f.checkForwardCompatibility(oldSchemaMap, newSchemaMap)
+		return f.isForwardCompatible(oldAvroSchema, newAvroSchema)
 	case types.Full, types.FullTransitive:
 		// Both backward and forward compatibility
-		// For transitive, registry layer will check against all previous versions
-		backward, err := f.checkBackwardCompatibility(oldSchemaMap, newSchemaMap)
+		backward, err := f.isBackwardCompatible(oldAvroSchema, newAvroSchema)
 		if err != nil || !backward {
 			return false, err
 		}
-		return f.checkForwardCompatibility(oldSchemaMap, newSchemaMap)
-	default:
+		return f.isForwardCompatible(oldAvroSchema, newAvroSchema)
+	case types.None:
 		return true, nil
+	default:
+		return false, fmt.Errorf("unsupported compatibility level: %s", level)
 	}
+}
+
+// isBackwardCompatible checks if new schema can read data written with old schema
+func (f *Format) isBackwardCompatible(oldSchema, newSchema *avro.Schema) (bool, error) {
+	// Get fields from both schemas
+	oldFields := f.getFields(oldSchema)
+	newFields := f.getFields(newSchema)
+
+	// Check each field in the old schema
+	for name, oldField := range oldFields {
+		newField, exists := newFields[name]
+		if !exists {
+			// Field was removed
+			if oldField.required {
+				return false, fmt.Errorf("required field %s was removed", name)
+			}
+			continue
+		}
+
+		// Check type compatibility
+		if !f.isTypeCompatible(oldField.type_, newField.type_) {
+			return false, fmt.Errorf("incompatible types for field %s: %s -> %s", name, oldField.type_, newField.type_)
+		}
+
+		// Check if field became required
+		if !oldField.required && newField.required {
+			return false, fmt.Errorf("field %s became required", name)
+		}
+	}
+
+	return true, nil
+}
+
+// isForwardCompatible checks if old schema can read data written with new schema
+func (f *Format) isForwardCompatible(oldSchema, newSchema *avro.Schema) (bool, error) {
+	// Get fields from both schemas
+	oldFields := f.getFields(oldSchema)
+	newFields := f.getFields(newSchema)
+
+	// Check each field in the new schema
+	for name, newField := range newFields {
+		oldField, exists := oldFields[name]
+		if !exists {
+			// New field was added
+			if newField.required {
+				return false, fmt.Errorf("new required field %s was added", name)
+			}
+			continue
+		}
+
+		// Check type compatibility
+		if !f.isTypeCompatible(newField.type_, oldField.type_) {
+			return false, fmt.Errorf("incompatible types for field %s: %s -> %s", name, newField.type_, oldField.type_)
+		}
+
+		// Check if field became optional
+		if oldField.required && !newField.required {
+			return false, fmt.Errorf("field %s became optional", name)
+		}
+	}
+
+	return true, nil
 }
 
 func (f *Format) toNative(data interface{}) (interface{}, error) {
@@ -117,95 +190,36 @@ func (f *Format) parseSchema(schemaStr string) (map[string]interface{}, error) {
 	return schemaMap, nil
 }
 
-func (f *Format) checkBackwardCompatibility(oldSchema, newSchema map[string]interface{}) (bool, error) {
-	// Get fields from both schemas
-	oldFields := f.getFields(oldSchema)
-	newFields := f.getFields(newSchema)
-
-	// Check if all required fields in old schema exist in new schema
-	for field, info := range oldFields {
-		if info.required {
-			if _, exists := newFields[field]; !exists {
-				return false, fmt.Errorf("required field %s removed in new schema", field)
-			}
-		}
-	}
-
-	// Check if field types are compatible
-	for field, oldInfo := range oldFields {
-		if newInfo, exists := newFields[field]; exists {
-			if !f.isTypeCompatible(oldInfo.type_, newInfo.type_) {
-				return false, fmt.Errorf("incompatible type change for field %s", field)
-			}
-		}
-	}
-
-	return true, nil
-}
-
-func (f *Format) checkForwardCompatibility(oldSchema, newSchema map[string]interface{}) (bool, error) {
-	// Get fields from both schemas
-	oldFields := f.getFields(oldSchema)
-	newFields := f.getFields(newSchema)
-
-	// Check if all required fields in new schema exist in old schema
-	for field, info := range newFields {
-		if info.required {
-			if _, exists := oldFields[field]; !exists {
-				return false, fmt.Errorf("required field %s added in new schema", field)
-			}
-		}
-	}
-
-	// Check if field types are compatible
-	for field, newInfo := range newFields {
-		if oldInfo, exists := oldFields[field]; exists {
-			if !f.isTypeCompatible(oldInfo.type_, newInfo.type_) {
-				return false, fmt.Errorf("incompatible type change for field %s", field)
-			}
-		}
-	}
-
-	return true, nil
-}
-
-type fieldInfo struct {
-	required bool
-	type_    string
-}
-
-func (f *Format) getFields(schema map[string]interface{}) map[string]fieldInfo {
+func (f *Format) getFields(schema *avro.Schema) map[string]fieldInfo {
 	fields := make(map[string]fieldInfo)
 
 	// Extract fields from schema
-	if fieldsList, ok := schema["fields"].([]interface{}); ok {
+	if fieldsList, ok := schema.Fields(); ok {
 		for _, field := range fieldsList {
-			if fieldMap, ok := field.(map[string]interface{}); ok {
-				name, _ := fieldMap["name"].(string)
-				typeValue := fieldMap["type"]
-				required := true // Default to required unless specified as optional
+			name := field.Name()
+			typeValue := field.Type()
+			required := true // Default to required unless specified as optional
 
-				// Handle type field which can be string or array
-				var typeStr string
-				switch t := typeValue.(type) {
-				case string:
-					typeStr = t
-				case []interface{}:
-					// Check if field is optional (union with null)
-					for _, v := range t {
-						if v == "null" {
-							required = false
-						}
-						if s, ok := v.(string); ok {
-							typeStr = s
-						}
+			// Handle type field which can be string or array
+			var typeStr string
+			switch t := typeValue.(type) {
+			case string:
+				typeStr = t
+			case []interface{}:
+				// Check if field is optional (union with null)
+				for _, v := range t {
+					if v == "null" {
+						required = false
+					}
+					if s, ok := v.(string); ok {
+						typeStr = s
 					}
 				}
+			}
 
-				fields[name] = fieldInfo{
-					required: required,
-					type_:    typeStr,
-				}
+			fields[name] = fieldInfo{
+				required: required,
+				type_:    typeStr,
 			}
 		}
 	}
