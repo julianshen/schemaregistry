@@ -544,6 +544,7 @@ func (r *Registry) GetVersions(subject string) ([]int, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	slog.Debug("GetVersions: getting versions for subject", "subject", subject)
 	prefix := fmt.Sprintf("%s%s/versions/", keyPrefixSubjects, subject)
 	keys, err := r.kvSchemas.Keys()
 	if err != nil {
@@ -573,6 +574,7 @@ func (r *Registry) GetVersions(subject string) ([]int, error) {
 	sort.Ints(versions)
 	r.subjectCache[subject] = versions
 
+	slog.Debug("GetVersions: versions", "versions", versions)
 	return versions, nil
 }
 
@@ -811,9 +813,7 @@ func (r *Registry) DeleteSchemaVersion(subject string, version string) error {
 
 // DeleteSubject deletes all versions of a subject
 func (r *Registry) DeleteSubject(subject string) ([]int, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
+	slog.Debug("DeleteSubject: deleting subject", "subject", subject)
 	// Get all versions
 	versions, err := r.GetVersions(subject)
 	if err != nil {
@@ -826,6 +826,8 @@ func (r *Registry) DeleteSubject(subject string) ([]int, error) {
 
 	slog.Debug("DeleteSubject: versions to delete", "subject", subject, "versions", versions)
 	deletedIDs := make([]int, 0, len(versions))
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	for _, version := range versions {
 		key := fmt.Sprintf("%s%s/versions/%d", keyPrefixSubjects, subject, version)
 		// Get schema before deleting
